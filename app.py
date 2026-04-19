@@ -79,6 +79,70 @@ else:
         except Exception:
             pass
 
+# --- Agentic AI Layers ---
+
+try:
+    from transformers import pipeline
+    @st.cache_resource
+    def load_llm():
+        return pipeline("text2text-generation", model="google/flan-t5-base")
+    llm_pipeline = load_llm()
+    LLM_AVAILABLE = True
+except ImportError:
+    LLM_AVAILABLE = False
+except Exception:
+    LLM_AVAILABLE = False
+
+def analyze_risks(inputs, predicted_yield_tons):
+    risks = []
+    try:
+        rainfall = float(inputs.get('average_rain_fall_mm_per_year', 1000))
+    except ValueError:
+        rainfall = 1000.0
+    try:
+        temp = float(inputs.get('avg_temp', 20))
+    except ValueError:
+        temp = 20.0
+    try:
+        pesticide = float(inputs.get('pesticides_tonnes', 0))
+    except ValueError:
+        pesticide = 0.0
+
+    if rainfall < 500:
+        risks.append("Low rainfall: High drought risk")
+    if temp > 35:
+        risks.append("High temperature: Crop heat stress risk")
+    if pesticide > 3.0:
+        risks.append("High pesticide usage: Soil degradation risk")
+    if predicted_yield_tons < 2.0:
+        risks.append("Low predicted yield: Production risk")
+    return risks
+
+def generate_advice(risks, inputs, predicted_yield_tons):
+    if not risks:
+        return ["No significant risks identified. Maintain current practices."]
+        
+    if LLM_AVAILABLE:
+        risks_str = ", ".join(risks)
+        prompt = f"The predicted crop yield is {predicted_yield_tons:.2f} tons/ha. Identified risks: {risks_str}. Give 3 short farming recommendations."
+        try:
+            output = llm_pipeline(prompt, max_length=150, do_sample=False)
+            advice_text = output[0]['generated_text']
+            return [advice_text]
+        except Exception:
+            pass # fallback to rule-based
+
+    advice = []
+    for risk in risks:
+        if "drought" in risk.lower():
+            advice.append("Increase irrigation frequency; consider drip irrigation")
+        elif "heat stress" in risk.lower():
+            advice.append("Use shade nets; consider heat-tolerant crop varieties")
+        elif "soil degradation" in risk.lower():
+            advice.append("Reduce pesticide use; introduce organic alternatives")
+        elif "production risk" in risk.lower():
+            advice.append("Consult agronomist; review soil nutrients and fertilizer schedule")
+    return list(set(advice))
 mode = st.sidebar.selectbox('Input mode', ['Single record', 'Upload CSV (raw or processed)'])
 
 st.sidebar.markdown('---')
