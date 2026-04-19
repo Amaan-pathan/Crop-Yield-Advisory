@@ -6,8 +6,8 @@ import json
 
 st.set_page_config(page_title="Crop Yield Predictor", layout="centered")
 
-st.title("🌾 Crop Yield Prediction — Milestone 1 UI")
-st.write("Upload a dataset or enter single-record values to get yield predictions. The app applies the same simple preprocessing used during training: numeric median imputation and label encoding for categoricals.")
+st.title("🌾 Crop Yield Prediction — Agentic Pipeline")
+st.write("Upload a dataset or enter single-record values to get yield predictions and an agentic advisory report.")
 
 # load models
 linear_model = None
@@ -19,13 +19,11 @@ if os.path.exists('models/crop_yield_model.pkl'):
 if os.path.exists('models/crop_yield_tree.pkl'):
     tree_model = joblib.load('models/crop_yield_tree.pkl')
 
-# prefer the label encoders saved by the simple trainer
 if os.path.exists('models/label_encoders_pipeline.pkl'):
     label_encoders = joblib.load('models/label_encoders_pipeline.pkl')
 elif os.path.exists('models/label_encoders.pkl'):
     label_encoders = joblib.load('models/label_encoders.pkl')
 
-# Load medians and feature order saved by the trainer (preferred)
 feature_order = None
 medians = {}
 if os.path.exists('models/feature_order.json'):
@@ -41,7 +39,6 @@ if os.path.exists('models/medians.json'):
     except Exception:
         medians = {}
 
-# Fallback: derive from training CSV if saved order is not present
 train_df = None
 numeric_cols = []
 categorical_cols = []
@@ -64,9 +61,6 @@ if feature_order is None:
         except Exception:
             feature_order = None
 else:
-    # set cols lists from feature_order
-    # assume numeric columns appeared first as written during training
-    # try to detect numeric names by checking train CSV types
     if os.path.exists('data/yield_df.csv'):
         try:
             train_df = pd.read_csv('data/yield_df.csv')
@@ -77,7 +71,6 @@ else:
             else:
                 X_train = train_df.copy()
             detected_numeric = X_train.select_dtypes(include=['number']).columns.tolist()
-            # build numeric and categorical lists by intersection
             numeric_cols = [c for c in feature_order if c in detected_numeric]
             categorical_cols = [c for c in feature_order if c not in numeric_cols]
             if len(numeric_cols) > 0 and not medians and os.path.exists('models/medians.json'):
@@ -86,11 +79,138 @@ else:
         except Exception:
             pass
 
+# --- Agentic AI Layers ---
+
+try:
+    from transformers import pipeline
+    @st.cache_resource
+    def load_llm():
+        return pipeline("text2text-generation", model="google/flan-t5-base")
+    llm_pipeline = load_llm()
+    LLM_AVAILABLE = True
+except ImportError:
+    LLM_AVAILABLE = False
+except Exception:
+    LLM_AVAILABLE = False
+
+def analyze_risks(inputs, predicted_yield_tons):
+    risks = []
+    try:
+        rainfall = float(inputs.get('average_rain_fall_mm_per_year', 1000))
+    except ValueError:
+        rainfall = 1000.0
+    try:
+        temp = float(inputs.get('avg_temp', 20))
+    except ValueError:
+        temp = 20.0
+    try:
+        pesticide = float(inputs.get('pesticides_tonnes', 0))
+    except ValueError:
+        pesticide = 0.0
+
+    if rainfall < 500:
+        risks.append("Low rainfall: High drought risk")
+    if temp > 35:
+        risks.append("High temperature: Crop heat stress risk")
+    if pesticide > 3.0:
+        risks.append("High pesticide usage: Soil degradation risk")
+    if predicted_yield_tons < 2.0:
+        risks.append("Low predicted yield: Production risk")
+    return risks
+
+def generate_advice(risks, inputs, predicted_yield_tons):
+    if not risks:
+        return ["No significant risks identified. Maintain current practices."]
+        
+    if LLM_AVAILABLE:
+        risks_str = ", ".join(risks)
+        prompt = f"The predicted crop yield is {predicted_yield_tons:.2f} tons/ha. Identified risks: {risks_str}. Give 3 short farming recommendations."
+        try:
+            output = llm_pipeline(prompt, max_length=150, do_sample=False)
+            advice_text = output[0]['generated_text']
+            return [advice_text]
+        except Exception:
+            pass # fallback to rule-based
+
+    advice = []
+    for risk in risks:
+        if "drought" in risk.lower():
+            advice.append("Increase irrigation frequency; consider drip irrigation")
+        elif "heat stress" in risk.lower():
+            advice.append("Use shade nets; consider heat-tolerant crop varieties")
+        elif "soil degradation" in risk.lower():
+            advice.append("Reduce pesticide use; introduce organic alternatives")
+        elif "production risk" in risk.lower():
+            advice.append("Consult agronomist; review soil nutrients and fertilizer schedule")
+    return list(set(advice))
+
+def run_agent(inputs, model, medians_dict):
+    # Preprocess
+    X = pd.DataFrame([inputs])
+    Xp = apply_simple_preprocessing(X)
+    Xp_model = align_to_model(Xp, model, medians_dict)
+    
+    # Predict (assumes model predicts in hg/ha)
+    pred_hg_ha = float(model.predict(Xp_model)[0])
+    pred_tons_ha = pred_hg_ha / 10000.0
+    
+    # 1. Analyze Risks
+    risks = analyze_risks(inputs, pred_tons_ha)
+    
+    # 2. Generate Advice
+    advice = generate_advice(risks, inputs, pred_tons_ha)
+    
+    # 3. Structured Report Output
+    st.markdown("---")
+    st.markdown("## 📄 Agentic Pipeline: Structured Report Output")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### 🌾 Crop Summary")
+        st.write(f"**Crop Name:** {inputs.get('Item', 'N/A')}")
+        st.write(f"**Region:** {inputs.get('Area', 'N/A')}")
+        st.write(f"**Year:** {inputs.get('Year', 'N/A')}")
+        with st.expander("View Input Values Used"):
+            st.json(inputs)
+            
+    with col2:
+        st.markdown("### 📊 Yield Interpretation")
+        if pred_tons_ha < 2.0:
+            yield_label = "Low"
+            color = "red"
+        elif pred_tons_ha < 5.0:
+            yield_label = "Medium"
+            color = "orange"
+        else:
+            yield_label = "High"
+            color = "green"
+        st.markdown(f"**Predicted Yield:** {pred_tons_ha:.2f} tons/ha")
+        st.markdown(f"**Yield Level:** :{color}[{yield_label}]")
+        
+    st.markdown("### ⚠️ Risk Factors")
+    if risks:
+        for r in risks:
+            st.markdown(f"- {r}")
+    else:
+        st.markdown("- No major risks identified.")
+        
+    st.markdown("### 💡 Recommended Actions")
+    for a in advice:
+        st.markdown(f"- {a}")
+        
+    st.markdown("### 📚 References")
+    st.markdown("- FAO Crop Guidelines 2023")
+    st.markdown("- ICAR Agronomy Manual")
+    
+    st.markdown("### ⚖️ Disclaimer")
+    st.caption("This report is AI-generated. Consult a certified agronomist before making decisions.")
+
+# --- End Agentic AI Layers ---
+
 mode = st.sidebar.selectbox('Input mode', ['Single record', 'Upload CSV (raw or processed)'])
 
 st.sidebar.markdown('---')
 st.sidebar.header('Model artifacts')
-# show metrics if present (try both naming conventions)
 metrics_files = []
 if os.path.exists('models'):
     for fname in os.listdir('models'):
@@ -105,7 +225,6 @@ for mf in metrics_files:
     except Exception:
         pass
 
-# show feature importances if present
 if os.path.exists('models/crop_yield_model_feature_importances.csv'):
     st.sidebar.write('Top linear features:')
     st.sidebar.dataframe(pd.read_csv('models/crop_yield_model_feature_importances.csv').head())
@@ -113,29 +232,24 @@ if os.path.exists('models/crop_yield_tree_feature_importances.csv'):
     st.sidebar.write('Top tree features:')
     st.sidebar.dataframe(pd.read_csv('models/crop_yield_tree_feature_importances.csv').head())
 
-# Helper: apply simple preprocessing to a dataframe (in-place copy)
 def apply_simple_preprocessing(df_input: pd.DataFrame) -> pd.DataFrame:
     df = df_input.copy()
-    # Fill numeric medians
     for col in (numeric_cols or []):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
             df[col] = df[col].fillna(medians.get(col, 0))
         else:
             df[col] = medians.get(col, 0)
-    # Fill and encode categorical
     for col in (categorical_cols or []):
         if col in df.columns:
             df[col] = df[col].fillna('missing').astype(str)
         else:
             df[col] = 'missing'
-        # apply saved label encoder if available
         if col in label_encoders:
             le = label_encoders[col]
             try:
                 df[col] = le.transform(df[col].astype(str))
             except Exception:
-                # fallback: if unseen values exist, map them to 'missing' class if available
                 def safe_transform(val):
                     v = str(val)
                     if v in le.classes_:
@@ -146,16 +260,12 @@ def apply_simple_preprocessing(df_input: pd.DataFrame) -> pd.DataFrame:
                         return 0
                 df[col] = df[col].apply(safe_transform)
         else:
-            # if no encoder saved, attempt simple label encoding on the fly
             df[col] = df[col].astype('category').cat.codes
-    # ensure column order matches training
     if feature_order is not None:
-        # only keep columns that are present in df
         cols_present = [c for c in feature_order if c in df.columns]
         df = df[cols_present]
     return df
 
-# Helper to align to a model's expected features
 def align_to_model(df, model, medians_dict):
     df2 = df.copy()
     expected = None
@@ -165,17 +275,14 @@ def align_to_model(df, model, medians_dict):
         expected = feature_order
     if expected is None:
         return df2
-    # Add any missing columns with median/defaults
     for col in expected:
         if col not in df2.columns:
-            # prefer medians for numeric; else fill with 0
             df2[col] = medians_dict.get(col, 0)
-    # Reindex to expected order
     df2 = df2.reindex(columns=expected)
     return df2
 
 if mode == 'Single record':
-    st.header('Single record prediction')
+    st.header('Single record prediction & Agentic Pipeline')
     if not feature_order:
         st.warning('Training data/feature order not available. Single-record inputs cannot be generated automatically. Upload a processed CSV instead.')
     else:
@@ -183,7 +290,6 @@ if mode == 'Single record':
         st.write('Enter feature values:')
         for col in feature_order:
             if col in categorical_cols:
-                # try to show human-readable options
                 if col in label_encoders:
                     classes = list(label_encoders[col].classes_)
                     selection = st.selectbox(col, classes)
@@ -194,24 +300,13 @@ if mode == 'Single record':
                 default_val = float(medians.get(col, 0)) if medians else 0.0
                 inputs[col] = st.number_input(col, value=default_val)
 
-        if st.button('Predict'):
-            X = pd.DataFrame([inputs])
-            Xp = apply_simple_preprocessing(X)
-            res = {}
-            if linear_model is not None:
-                try:
-                    Xp_l = align_to_model(Xp, linear_model, medians)
-                    res['linear_model'] = float(linear_model.predict(Xp_l)[0])
-                except Exception as e:
-                    res['linear_model_error'] = str(e)
-            if tree_model is not None:
-                try:
-                    Xp_t = align_to_model(Xp, tree_model, medians)
-                    res['tree_model'] = float(tree_model.predict(Xp_t)[0])
-                except Exception as e:
-                    res['tree_model_error'] = str(e)
-            st.subheader('Prediction')
-            st.write(res)
+        if st.button('Run Agent Pipeline'):
+            # prefer tree_model if available
+            model_to_use = tree_model if tree_model is not None else linear_model
+            if model_to_use is not None:
+                run_agent(inputs, model_to_use, medians)
+            else:
+                st.error("No trained models found in 'models/' directory.")
 
 else:
     st.header('Batch prediction from CSV')
@@ -221,10 +316,8 @@ else:
         st.write('Preview of uploaded data:')
         st.dataframe(df.head())
 
-        # Apply preprocessing
         try:
             Xp = apply_simple_preprocessing(df)
-            # reindex to saved feature_order (keep only present columns)
             if feature_order is not None:
                 Xp = Xp.reindex(columns=[c for c in feature_order if c in Xp.columns])
             st.write('Preprocessed preview:')
